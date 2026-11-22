@@ -1,0 +1,34 @@
+# Zet dit in configuration.yaml (of in een package). Het is een trigger-sensor: hij verandert
+# alleen als de ESP het event "esphome.bluebot_map" stuurt (elke 5 s tijdens het schoonmaken,
+# bij het einde van een beurt, bij een reset en bij de knop op de ESP).
+# De standen (inclusief attributen) worden volgens de HA-documentatie na een herstart teruggezet,
+# controleer dat bij jou na een herstart.
+
+template:
+  - triggers:
+      - trigger: event
+        event_type: esphome.bluebot_map
+    sensor:
+      - name: "Bluebot kaart"
+        unique_id: bluebot_kaart
+        unit_of_measurement: "m²"
+        state: "{{ trigger.event.data.area_m2 | float(0) }}"
+        attributes:
+          map: "{{ trigger.event.data.map }}"
+          track: "{{ trigger.event.data.track }}"
+          area_m2: "{{ trigger.event.data.area_m2 }}"
+          clear_area: "{{ trigger.event.data.clear_area }}"
+          points: "{{ trigger.event.data.points }}"
+          elapsed_s: "{{ trigger.event.data.elapsed_s }}"
+          reason: "{{ trigger.event.data.reason }}"
+          seq: "{{ trigger.event.data.seq }}"
+          session: "{{ trigger.event.data.session }}"
+          x: "{{ trigger.event.data.x }}"
+          y: "{{ trigger.event.data.y }}"
+          live: "{{ trigger.event.data.live }}"
+
+# De attributen zijn enkele KB per update. Houd ze uit de database:
+recorder:
+  exclude:
+    entities:
+      - sensor.bluebot_kaart

@@ -1,0 +1,862 @@
+# Board: ESP32-C3 Super Mini (Generic)
+# Definition: definitions/boards/esp32-c3-supermini/manifest.yaml
+
+esphome:
+  name: esp32-c3-supermini-stofzuiger
+  friendly_name: ESP32 C3 Supermini Stofzuiger
+  includes:
+    - bluebot_helpers.h
+    - bluebot_map.h
+
+esp32:
+  variant: esp32c3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  batch_delay: 0ms
+  # Nodig voor homeassistant.event (kaart naar Home Assistant sturen). Geef het apparaat in
+  # Home Assistant ook toestemming: Instellingen > Apparaten > ESPHome > Configureren >
+  # "Allow the device to perform Home Assistant actions".
+  homeassistant_services: true
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ESP32 C3 Superm Fallback Hotspot
+    password: !secret ap_password
+
+ 
+captive_portal:
+ 
+  # De webserver zorgt voor de draadloze live-weergave van de logs in je browser
+web_server:
+  port: 80
+ 
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+ 
+# Tijdbron voor de knop "Bluebot klok: nu instellen". now() geeft lokale tijd.
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Europe/Amsterdam
+    on_time:
+      # Elke nacht om 03:00 de klok van de robot gelijkzetten (zomer- en wintertijd).
+      - seconds: 0
+        minutes: 0
+        hours: 3
+        then:
+          - if:
+              condition:
+                switch.is_on: klok_auto
+              then:
+                - script.execute: klok_nu
+ 
+globals:
+  - id: zoek_voorheen_aan
+    type: bool
+    initial_value: 'true'
+  - id: zoek_pogingen
+    type: int
+    initial_value: '0'
+ 
+switch:
+  - platform: gpio
+    pin: GPIO6
+    id: esp8266_shutdown
+    inverted: true
+    restore_mode: ALWAYS_ON
+    disabled_by_default: true
+ 
+  # --- 🔊 Robotgeluid (transitCmd 123/125): E209 / 04 00 00 00 00 XX 00 00, XX = 02 aan, 01 uit ---
+  # De stand komt uit het statusframe (p[7]: 02 = aan, 01 = uit, bevestigd met een
+  # omschakeltest). De schakelaar springt dus pas om als de robot het meldt.
+  - platform: template
+    id: bluebot_voice
+    name: "Bluebot geluid"
+    icon: "mdi:volume-high"
+    turn_on_action:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: !lambda 'return bluebot_voice_payload(true);'
+    turn_off_action:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: !lambda 'return bluebot_voice_payload(false);'
+ 
+  # --- 🕒 Klok automatisch instellen: elke nacht om 03:00 (zie time: on_time) ---
+  # Aan = de klok van de robot wordt elke nacht gelijkgezet. Staat standaard aan.
+  - platform: template
+    id: klok_auto
+    name: "Bluebot klok: automatisch instellen"
+    icon: "mdi:clock-time-three-outline"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+ 
+  # --- 🗺️ Live kaart: elke 5 s een event tijdens het schoonmaken (uit te zetten indien gewenst) ---
+  - platform: template
+    id: map_live_sw
+    name: "Bluebot kaart: live-updates"
+    icon: "mdi:map-clock"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # --- 🗺️ Logging van ontvangen frames. Uit te zetten zodra de kaart is uitgezocht. ---
+  - platform: template
+    id: bluebot_log_rx
+    name: "Bluebot RX-frames loggen"
+    icon: "mdi:text-box-search-outline"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+# --- 🚀 Losse bedieningsknoppen (Stop en Dock) ---
+button:
+  - platform: template
+    name: "Stuur frame"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: !lambda 'return id(tx_type).state;'
+          payload_hex: !lambda 'return id(tx_payload).state;'
+  - platform: template
+    name: "NOODSTOP (STOP)"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "030000000000"
+  - platform: template
+    name: "Robot Start (Auto)"
+    icon: "mdi:play"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "020500000000"
+  - platform: template
+    name: "Robot Stop"
+    icon: "mdi:stop"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "030000000000"
+  - platform: template
+    name: "Robot Terug naar Dock"
+    icon: "mdi:home-import-outline"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "010000000000"
+ 
+  - platform: template
+    name: "Robot beweeg Vooruit"
+    icon: "mdi:arrow-up-bold"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "0300000100000000"
+ 
+  - platform: template
+    name: "Robot beweeg Achteruit"
+    icon: "mdi:arrow-down-bold"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "0300000200000000"
+ 
+  - platform: template
+    name: "Robot beweeg naar Links"
+    icon: "mdi:arrow-left-bold"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "0300000300000000"
+ 
+  - platform: template
+    name: "Robot beweeg naar Rechts"
+    icon: "mdi:arrow-right-bold"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "0300000400000000"
+ 
+  - platform: template
+    name: "Robot Besturing Stop"
+    icon: "mdi:stop-circle-outline"
+    on_press:
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: "0300000500000000"
+ 
+  # --- 🕒 Klok: huidige tijd instellen (transitCmd 139, frame D4 07) ---
+  - platform: template
+    id: bluebot_klok_nu
+    name: "Bluebot klok: nu instellen"
+    icon: "mdi:clock-check-outline"
+    on_press:
+      - script.execute: klok_nu
+ 
+  # --- 📅 Planner (transitCmd 113/115/117/149) ---
+  # De robot beantwoordt elk schrijfframe (D1 07) zelf met de actuele planning (D3 07),
+  # dus na instellen of wissen is geen aparte opvraging (D2 07) nodig. Het antwoord
+  # verschijnt in "Bluebot planner" en "Bluebot planner (ruwe hex)".
+  - platform: template
+    id: planner_opvragen
+    name: "Bluebot planner opvragen"
+    icon: "mdi:calendar-refresh"
+    on_press:
+      - script.execute: planner_request
+ 
+  - platform: template
+    id: planner_instellen
+    name: "Bluebot planner instellen"
+    icon: "mdi:calendar-plus"
+    on_press:
+      - lambda: |-
+          uint8_t mask = bluebot_planner_days_from_name(std::string(id(planner_dag).current_option()));
+          if (mask == 0 || !id(planner_tijd).has_state()) {
+            ESP_LOGW("planner", "Planner niet ingesteld: kies eerst een dag en een tijd");
+            return;
+          }
+          auto t = id(planner_tijd).state_as_esptime();
+          id(planner_write_set).execute(mask, t.hour, t.minute);
+ 
+  - platform: template
+    id: planner_wissen
+    name: "Bluebot planner wissen"
+    icon: "mdi:calendar-remove"
+    on_press:
+      - lambda: |-
+          uint8_t mask = bluebot_planner_days_from_name(std::string(id(planner_dag).current_option()));
+          if (mask == 0) {
+            ESP_LOGW("planner", "Planner niet gewist: kies eerst een dag");
+            return;
+          }
+          id(planner_write_clear).execute(mask);
+ 
+  # Testknop: vult maandag t/m zondag met unieke tijden (01:21, 02:22 ... 07:27)
+  # Overschrijft de bestaande planning. Het laatste antwoord van de robot bevat de hele week.
+  - platform: template
+    id: planner_testset
+    name: "Bluebot planner testset schrijven"
+    icon: "mdi:test-tube"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: planner_test_a
+ 
+  # --- 🔔 Zoek de robot (transitCmd 143) ---
+  - platform: template
+    id: zoek_robot_knop
+    name: "Bluebot zoek robot"
+    icon: "mdi:bell-ring"
+    on_press:
+      - script.execute: zoek_robot
+ 
+  # --- 🗺️ Kaart en frame-inventaris ---
+  - platform: template
+    id: map_log_btn
+    name: "Bluebot kaart: loggen en publiceren"
+    icon: "mdi:map-search"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          g_map.take_snapshot("handmatig");
+
+  - platform: template
+    id: map_clear_btn
+    name: "Bluebot kaart: wissen"
+    icon: "mdi:map-marker-remove"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          g_map.clear("handmatig gewist");
+
+  - platform: template
+    id: inv_dump_btn
+    name: "Bluebot frame-inventaris loggen"
+    icon: "mdi:format-list-numbered"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          g_inv.dump();
+          ESP_LOGI("frames", "Assembler: %u bytes, %u frames, %u checksumfouten, %u afgebroken frames",
+                   (unsigned) g_rx.bytes_, (unsigned) g_rx.frames_, (unsigned) g_rx.bad_checksum_,
+                   (unsigned) g_rx.dropped_partial_);
+
+  - platform: template
+    id: inv_reset_btn
+    name: "Bluebot frame-inventaris resetten"
+    icon: "mdi:counter"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          g_inv.reset();
+
+# --- 🕒 Klok: zelf gekozen datum en tijd instellen ---
+datetime:
+  - platform: template
+    id: bluebot_klok_kiezer
+    name: "Bluebot klok kiezen"
+    icon: "mdi:clock-edit-outline"
+    type: datetime
+    optimistic: true
+    set_action:
+      - lambda: |-
+          id(send_clock).execute(x.year, x.month, x.day_of_month, x.hour, x.minute);
+ 
+  # --- 📅 Planner: tijd voor "instellen" ---
+  - platform: template
+    id: planner_tijd
+    name: "Bluebot planner tijd"
+    icon: "mdi:clock-time-four-outline"
+    type: time
+    optimistic: true
+    initial_value: "07:30:00"
+    restore_value: true
+ 
+# --- 🎯 Dropdownmenu uitsluitend voor Schoonmaakmodi ---
+select:
+  - platform: template
+    name: "Robot Modus Selecteren"
+    id: robot_command_select
+    icon: "mdi:robot-vacuum-variant"
+    options:
+      - "Kies modus..."
+      - "Schoonmaken (Auto)"
+      - "Schoonmaken (Area)"
+      - "Schoonmaken (Edge)"
+      - "Schoonmaken (ZigZag)"
+      - "Schoonmaken (Intensief)"
+    initial_option: "Kies modus..."
+    set_action:
+      - lambda: |-
+          std::string payload;
+          std::string label;
+          if (x == "Schoonmaken (Auto)") { payload = "020500000000"; label = "Auto"; }
+          else if (x == "Schoonmaken (Area)") { payload = "020400000000"; label = "Area"; }
+          else if (x == "Schoonmaken (Edge)") { payload = "020300000000"; label = "Edge"; }
+          else if (x == "Schoonmaken (ZigZag)") { payload = "020200000000"; label = "ZigZag"; }
+          else if (x == "Schoonmaken (Intensief)") { payload = "020600000000"; label = "Intensief"; }
+          else { return; }
+ 
+          id(send_frame_script).execute("E209", payload);
+          ESP_LOGI("TX", "Commando verzonden: START (%s modus)", label.c_str());
+ 
+          // Reset de dropdown direct weer naar de neutrale status
+          id(robot_command_select).publish_state("Kies modus...");
+ 
+  # --- 💨 Zuigkracht (transitCmd 110): alleen te wijzigen als de robot stilstaat ---
+  # De stand komt terug uit het statusframe (p[2], alleen als p[0] == 2). De select
+  # toont dus wat de robot meldt, niet wat er is aangeklikt.
+  - platform: template
+    id: robot_fan
+    name: "Bluebot zuigkracht"
+    icon: "mdi:fan"
+    options:
+      - "Uit"
+      - "Zacht"
+      - "Hard"
+    set_action:
+      - lambda: |-
+          if (!id(st_b0).has_state() || id(st_b0).state != 2) {
+            ESP_LOGW("tx", "Zuigkracht niet verstuurd: alleen mogelijk als de robot stilstaat");
+            return;
+          }
+          std::string payload = bluebot_fan_payload(x);
+          if (payload.empty()) return;
+          id(send_frame_script).execute("E209", payload);
+ 
+  # --- 📅 Planner: dag(en) kiezen voor "instellen" en "wissen" ---
+  - platform: template
+    id: planner_dag
+    name: "Bluebot planner dag"
+    icon: "mdi:calendar-week"
+    optimistic: true
+    options:
+      - "Maandag"
+      - "Dinsdag"
+      - "Woensdag"
+      - "Donderdag"
+      - "Vrijdag"
+      - "Zaterdag"
+      - "Zondag"
+      - "Werkdagen (ma-vr)"
+      - "Weekend"
+      - "Alle dagen"
+    initial_option: "Maandag"
+ 
+uart:
+  - id: uart_1
+    rx_pin: GPIO4
+    tx_pin: GPIO5
+    baud_rate: 9600
+    # Groot genoeg voor een paar seconden verkeer als de hoofdlus even bezig is.
+    rx_buffer_size: 1024
+    # Geen "debug:" meer. De debug-hook knipte de stroom elke 256 bytes door, waardoor
+    # tijdens een schoonmaakbeurt (continu verkeer) frames werden gehalveerd en weggegooid.
+    # Het lezen gebeurt nu in de interval hieronder, met een frame-assembler (bluebot_map.h).
+
+interval:
+  - interval: 10ms
+    then:
+      - lambda: |-
+          // 1) bytes uit de UART naar de frame-assembler
+          size_t avail = id(uart_1).available();
+          uint8_t tmp[64];
+          while (avail > 0) {
+            size_t k = avail > sizeof(tmp) ? sizeof(tmp) : avail;
+            if (!id(uart_1).read_array(tmp, k)) break;
+            g_rx.feed(tmp, k);
+            avail -= k;
+          }
+
+          // 2) complete, geldige frames verwerken
+          std::vector<uint8_t> fr;
+          while (g_rx.pop(fr)) {
+            const uint8_t *f = fr.data();
+            const size_t flen = fr.size();
+            const size_t plen = flen - 12;
+            const uint8_t *p = f + 12;
+
+            if (g_inv.record(f, flen))
+              ESP_LOGW("frames", "NIEUW frametype %02X %02X, lengte %u: %s", f[6], f[7], (unsigned) plen,
+                       bluebot_hex(p, plen < 24 ? plen : 24).c_str());
+            if (id(bluebot_log_rx).state)
+              ESP_LOGD("UART1", "RX %s", format_hex_pretty(f, flen).c_str());
+
+            // D7 07 (leeg frame): kaart-reset van de robot, zodra hij gaat rijden.
+            if (plen == 0 && f[6] == 0xD7 && f[7] == 0x07) g_map.on_reset_frame();
+
+            if (plen == 12) {
+              // Statusframe
+              if (g_inv.status_changed(p, plen))
+                ESP_LOGI("status", "Status gewijzigd (type %02X %02X): %s", f[6], f[7], bluebot_hex(p, plen).c_str());
+              int tr = g_map.on_status(p[0]);
+              if (tr == 1) {
+                ESP_LOGI("map", "Schoonmaakbeurt begint. Kaart bevat al %u trackpunten, oppervlak %u",
+                         (unsigned) g_map.points(), (unsigned) g_map.clear_area());
+              } else if (tr == 2) {
+                ESP_LOGI("map", "Schoonmaakbeurt voorbij (status %u)", p[0]);
+                g_map.take_snapshot("einde beurt");
+              }
+
+              id(st_hex).publish_state(bluebot_hex(p, plen));
+              id(st_b0).publish_state(p[0]);
+              id(st_b1).publish_state(p[1]);
+              id(st_b2).publish_state(p[2]);
+              id(st_b3).publish_state(p[3]);
+              id(st_b4).publish_state(p[4]);
+              id(st_b5).publish_state(p[5]);
+              id(st_b6).publish_state(p[6]);
+              id(st_b7).publish_state(p[7]);
+
+              id(robot_battery).publish_state(p[6]);
+              if (p[0] == 2) {
+                // Gestopt: p[2] toont dan de zuigkracht (1-3), geen hoofdmodus.
+                id(robot_mode).publish_state("Gestopt");
+                std::string fan = bluebot_decode_fan(p[2]);
+                if (fan != "Unknown") id(robot_fan).publish_state(fan);
+              } else {
+                id(robot_mode).publish_state(bluebot_decode_hoofdmodus(p[2]));
+              }
+
+              // p[7]: voice-status (02 = aan, 01 = uit).
+              if (p[7] == 1 || p[7] == 2) id(bluebot_voice).publish_state(p[7] == 2);
+              id(robot_sub_mode).publish_state(bluebot_decode_submodus(p[1]));
+              id(robot_nozzle).publish_state(bluebot_decode_nozzle(p[5]));
+              id(robot_status).publish_state(bluebot_decode_general_status(p[0]));
+              id(robot_errors).publish_state(bluebot_decode_errors(p[8], p[9], p[10]));
+
+            } else if (plen == 4) {
+              // Positieframe. Uit FUN_4023d420: p[0] = rij (y), p[1] = kolom (x),
+              // p[2] en p[3] = 8 buurcellen van 2 bit.
+              g_map.on_position(p, plen);
+              id(pos_a).publish_state(p[1]);  // x
+              id(pos_b).publish_state(p[0]);  // y
+              id(map_cell_bytes).publish_state(bluebot_hex(p + 2, 2));
+
+            } else if (plen == 0 && f[6] == 0xD5 && f[7] == 0x07) {
+              // Klokframe (D4 07) bevestigd door de robot: leeg D5 07, zonder tijd.
+              auto t = id(ha_time).now();
+              ESP_LOGI("klok", "Klok bevestigd door de robot");
+              if (t.is_valid()) id(klok_ack).publish_state(t.strftime("%Y-%m-%d %H:%M"));
+
+            } else if (plen == 14) {
+              // Planner-antwoord op D2 07: 7 slots van 2 bytes (zo t/m za), zie bluebot_planner_decode.
+              id(planner_hex).publish_state(bluebot_hex(p, plen));
+              ESP_LOGI("planner", "Planner-antwoord: %s", bluebot_hex(p, plen).c_str());
+              id(planner_tekst).publish_state(bluebot_planner_decode(p, plen));
+
+            } else if (plen == 20) {
+              // Firmwareversie
+              id(fw_version).publish_state(std::string((const char *) p, plen));
+            }
+
+            // Alles wat geen status, positie, klok, planner of firmware is: altijd loggen en tonen.
+            // Hier zit het "kaart verouderd"-signaal vermoedelijk tussen.
+            if (plen != 12 && plen != 4 && plen != 14 && plen != 20 && !(plen == 0 && f[6] == 0xD5)) {
+              std::string h = bluebot_hex(f, flen);
+              ESP_LOGW("frames", "ANDERS frame t=%us: %s | laatste status: %s", (unsigned) (millis() / 1000),
+                       h.c_str(), g_inv.last_status_hex.c_str());
+              id(last_other_frame).publish_state(h.substr(0, 250));
+            }
+          }
+
+          // 3) kaart: sensoren bijwerken (hoogstens elke 2 s) en snapshot laten publiceren
+          if (g_map.ui_due()) {
+            id(map_area).publish_state(g_map.clear_area());
+            id(map_area_m2).publish_state(g_map.area_m2());
+            id(map_points).publish_state(g_map.points());
+          }
+          if (id(map_live_sw).state && g_map.live_due()) {}  // zet intern publish_pending
+          if (g_map.take_publish_pending()) id(map_publish).execute();
+
+binary_sensor:
+  - platform: template
+    name: "Robot actief"
+    lambda: |-
+      if (!id(st_b0).has_state()) return {};
+      return id(st_b0).state == 1;
+ 
+sensor:
+  - platform: template
+    id: map_area
+    name: "Bluebot kaart: clearArea (firmware, hele eenheden)"
+    icon: "mdi:texture-box"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: map_area_m2
+    name: "Bluebot kaart: oppervlak (geschat)"
+    icon: "mdi:texture-box"
+    unit_of_measurement: "m²"
+    accuracy_decimals: 2
+    entity_category: diagnostic
+  - platform: template
+    id: map_points
+    name: "Bluebot kaart: trackpunten"
+    icon: "mdi:vector-polyline"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: robot_battery
+    name: "Robot batterij"
+    device_class: battery
+    state_class: measurement
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b0
+    name: "Robot status byte 0 - status"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b1
+    name: "Robot status byte 1 - mode AUTO AREA EDGE ZIGZAG"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b2
+    name: "Robot status byte 2 - mode RUN STOP"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b3
+    name: "Robot status byte 3 - unknown"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b4
+    name: "Robot status byte 4 - unknown"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b5
+    name: "Robot status byte 5 - zuigmond"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b6
+    name: "Robot status byte 6 - battery"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: st_b7
+    name: "Robot status byte 7 - unknown"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+  - platform: template
+    id: pos_a  # x = p[1] van het positieframe
+    name: "Robot positie X"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    device_class: distance
+    state_class: measurement
+  - platform: template
+    id: pos_b  # y = p[0] van het positieframe
+    name: "Robot positie Y"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    device_class: distance
+    state_class: measurement
+ 
+text_sensor:
+  - platform: template
+    id: map_summary
+    name: "Bluebot kaart: laatste snapshot"
+    icon: "mdi:map"
+    entity_category: diagnostic
+  - platform: template
+    id: last_other_frame
+    name: "Bluebot laatste afwijkende frame (hex)"
+    entity_category: diagnostic
+  - platform: template
+    id: robot_status
+    name: "Robot status"
+    icon: "mdi:robot-vacuum"
+  - platform: template
+    id: robot_mode
+    name: "Robot hoofdmodus"
+    icon: "mdi:robot"
+  - platform: template
+    id: robot_sub_mode
+    name: "Robot submodus"
+    icon: "mdi:layers-outline"
+  - platform: template
+    id: robot_nozzle
+    name: "Robot zuigmond"
+    icon: "mdi:robot-vacuum"
+  - platform: template
+    id: robot_errors
+    name: "Robot foutmelding(en)"
+    icon: "mdi:alert-circle"
+  - platform: template
+    id: fw_version
+    name: "Robot firmware"
+    entity_category: diagnostic
+  - platform: template
+    id: st_hex
+    name: "Robot status (hex)"
+    entity_category: diagnostic
+  - platform: template
+    id: map_cell_bytes
+    name: "Robot kaartcellen rond huidige positie (ruwe hex)"
+    entity_category: diagnostic
+  - platform: template
+    id: planner_hex
+    name: "Bluebot planner (ruwe hex)"
+    entity_category: diagnostic
+  - platform: template
+    id: planner_tekst
+    name: "Bluebot planner"
+    icon: "mdi:calendar-clock"
+  - platform: template
+    id: klok_ack
+    name: "Bluebot klok: laatst bevestigd"
+    icon: "mdi:clock-check"
+ 
+# debugging
+text:
+  - platform: template
+    id: tx_type
+    name: "TX Type (2 bytes hex)"
+    mode: text
+    optimistic: true
+    min_length: 0
+    max_length: 4
+    initial_value: "E209"
+    restore_value: true
+  - platform: template
+    id: tx_payload
+    name: "TX Payload (hex)"
+    mode: text
+    optimistic: true
+    min_length: 0
+    max_length: 40
+    initial_value: "020000000100"
+    restore_value: true
+ 
+script:
+  # Enige verzendpad: alle knoppen, de select en de klok lopen hierdoor.
+  - id: send_frame_script
+    parameters:
+      type_hex: string
+      payload_hex: string
+    then:
+      - lambda: |-
+          std::vector<uint8_t> f;
+          if (!bluebot_frame_from_hex(type_hex, payload_hex, f)) {
+            ESP_LOGW("tx", "type moet 2 bytes zijn");
+            return;
+          }
+          ESP_LOGI("tx", "TX: %s", format_hex_pretty(f).c_str());
+          id(uart_1).write_array(f.data(), f.size());
+ 
+  # Klok: valideert, bouwt de payload (D4 07) en geeft die door aan send_frame_script.
+  - id: send_clock
+    parameters:
+      year: int
+      month: int
+      day: int
+      hour: int
+      minute: int
+    then:
+      - lambda: |-
+          std::vector<uint8_t> pl;
+          if (!bluebot_clock_payload(year, month, day, hour, minute, pl)) {
+            ESP_LOGW("tx", "Klok niet verstuurd, ongeldige waarde: %d-%02d-%02d %02d:%02d",
+                     year, month, day, hour, minute);
+            return;
+          }
+          id(send_frame_script).execute("D407", bluebot_hex(pl.data(), pl.size()));
+ 
+  # Zet de klok van de robot op de huidige lokale tijd. Gebruikt door de knop
+  # "Bluebot klok: nu instellen" en door de nachtelijke synchronisatie.
+  - id: klok_nu
+    then:
+      - lambda: |-
+          auto t = id(ha_time).now();
+          if (!t.is_valid()) {
+            ESP_LOGW("tx", "Klok niet verstuurd: de tijd is nog niet gesynchroniseerd");
+            return;
+          }
+          id(send_clock).execute(t.year, t.month, t.day_of_month, t.hour, t.minute);
+ 
+  # --- Planner ---
+  # Planning opvragen: D2 07 met lege payload. Het antwoord is een frame met 14 payload-bytes.
+  - id: planner_request
+    then:
+      - lambda: |-
+          id(send_frame_script).execute("D207", "");
+ 
+  # Eén of meer dagen instellen: D1 07. day_mask is het dagmasker (zie bluebot_day_mask).
+  - id: planner_write_set
+    parameters:
+      day_mask: int
+      hour: int
+      minute: int
+    then:
+      - lambda: |-
+          if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || day_mask <= 0 || day_mask > 0xFF) {
+            ESP_LOGW("planner", "Planner niet verstuurd, ongeldige waarde: masker %d, %02d:%02d",
+                     day_mask, hour, minute);
+            return;
+          }
+          auto pl = bluebot_planner_set_payload((uint8_t) day_mask, hour, minute);
+          id(send_frame_script).execute("D107", bluebot_hex(pl.data(), pl.size()));
+ 
+  # Eén of meer dagen wissen: D1 07 met 0F in de tijdvelden.
+  - id: planner_write_clear
+    parameters:
+      day_mask: int
+    then:
+      - lambda: |-
+          if (day_mask <= 0 || day_mask > 0xFF) {
+            ESP_LOGW("planner", "Planner niet gewist, ongeldig masker: %d", day_mask);
+            return;
+          }
+          auto pl = bluebot_planner_clear_payload((uint8_t) day_mask);
+          id(send_frame_script).execute("D107", bluebot_hex(pl.data(), pl.size()));
+ 
+  # Test A: maandag t/m zondag met uniek uur en minuut, 500 ms tussen de frames,
+  # Maandag 01:21, dinsdag 02:22 ... zondag 07:27. De robot antwoordt na elk frame zelf.
+  - id: planner_test_a
+    then:
+      - repeat:
+          count: 7
+          then:
+            - lambda: |-
+                int day = (iteration + 1) % 7;
+                id(planner_write_set).execute(bluebot_day_mask(day), iteration + 1, 21 + iteration);
+            - delay: 500ms
+ 
+  # Zoek de robot (transitCmd 143), de reeks uit de firmware (FUN_4023b860):
+  # geluid uit, aan, uit, aan, met 100 ms ertussen. De firmware eindigt dus met geluid aan.
+  # Eigen toevoeging: daarna zetten we het geluid terug naar de stand van vóór de knop. We
+  # vertrouwen niet op één frame, maar controleren via de statusmelding van de robot (p[7]) en
+  # sturen hoogstens 3 keer opnieuw, met 1 s ertussen.
+  - id: zoek_robot
+    mode: single
+    then:
+      - lambda: |-
+          id(zoek_voorheen_aan) = !id(bluebot_voice).has_state() || id(bluebot_voice).state;
+          id(zoek_pogingen) = 0;
+          ESP_LOGI("zoek", "Zoek de robot: geluid stond %s", id(zoek_voorheen_aan) ? "aan" : "uit");
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: !lambda 'return bluebot_voice_payload(false);'
+      - delay: 100ms
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: !lambda 'return bluebot_voice_payload(true);'
+      - delay: 100ms
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: !lambda 'return bluebot_voice_payload(false);'
+      - delay: 100ms
+      - script.execute:
+          id: send_frame_script
+          type_hex: "E209"
+          payload_hex: !lambda 'return bluebot_voice_payload(true);'
+      - delay: 1s
+      - while:
+          condition:
+            lambda: 'return id(bluebot_voice).has_state() && id(bluebot_voice).state != id(zoek_voorheen_aan) && id(zoek_pogingen) < 3;'
+          then:
+            - lambda: |-
+                id(zoek_pogingen)++;
+                ESP_LOGI("zoek", "Geluid terugzetten naar %s (poging %d)", id(zoek_voorheen_aan) ? "aan" : "uit", id(zoek_pogingen));
+            - script.execute:
+                id: send_frame_script
+                type_hex: "E209"
+                payload_hex: !lambda 'return bluebot_voice_payload(id(zoek_voorheen_aan));'
+            - delay: 1s
+      - lambda: |-
+          ESP_LOGI("zoek", "Zoek de robot klaar: geluid is nu %s", id(bluebot_voice).state ? "aan" : "uit");
+
+  # Kaart naar Home Assistant: een event "esphome.bluebot_map" met de kaart en de track als base64,
+  # in het formaat van de firmware (kop van 9 bytes + RLE, en trackkop 01 + clearArea + N).
+  # Luister in HA via Ontwikkelaarstools > Gebeurtenissen > "esphome.bluebot_map".
+  # De snapshot staat ook in de log (regels "MAPB64 ...") en als ASCII-kaart (regels "KAART ...").
+  - id: map_publish
+    mode: queued
+    then:
+      - lambda: |-
+          if (!g_map.snap().live) id(map_summary).publish_state(g_map.snap().summary.substr(0, 250));
+      - homeassistant.event:
+          event: esphome.bluebot_map
+          data:
+            reason: !lambda 'return g_map.snap().reason;'
+            clear_area: !lambda 'return std::to_string(g_map.snap().area);'
+            area_m2: !lambda 'return g_map.snap().area_m2_s;'
+            seq: !lambda 'return std::to_string(g_map.snap().seq);'
+            session: !lambda 'return std::to_string(g_map.snap().session);'
+            x: !lambda 'return std::to_string(g_map.snap().x);'
+            y: !lambda 'return std::to_string(g_map.snap().y);'
+            live: !lambda 'return std::string(g_map.snap().live ? "1" : "0");'
+            points: !lambda 'return std::to_string(g_map.snap().points);'
+            elapsed_s: !lambda 'return std::to_string(g_map.snap().elapsed_s);'
+            map: !lambda 'return g_map.snap().map_b64;'
+            track: !lambda 'return g_map.snap().track_b64;'
